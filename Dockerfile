@@ -1,4 +1,4 @@
-FROM golang:1.16 AS builder
+FROM golang:1.25.4 AS builder
 WORKDIR /src
 
 # avoid downloading the dependencies on succesive builds
@@ -17,7 +17,7 @@ ENV GO111MODULE=on
 RUN go test
 RUN go build -o /bin/postfix_exporter
 
-FROM debian:latest
+FROM debian:trixie-slim
 EXPOSE 9154
 WORKDIR /
 COPY --from=builder /bin/postfix_exporter /bin/
