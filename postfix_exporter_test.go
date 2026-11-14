@@ -3,12 +3,15 @@ package main
 import (
 	"testing"
 
-	"sort"
-
 	"github.com/prometheus/client_golang/prometheus"
 	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 )
+
+type unsupportedLogEntry struct {
+	labels map[string]string
+	count  float64
+}
 
 func TestPostfixExporter_CollectFromLogline(t *testing.T) {
 	type fields struct {
@@ -50,7 +53,7 @@ func TestPostfixExporter_CollectFromLogline(t *testing.T) {
 		smtpMessagesProcessed  int
 		bounceNonDelivery      int
 		virtualDelivered       int
-		unsupportedLogEntries  []string
+		unsupportedLogEntries  []unsupportedLogEntry
 	}
 	tests := []struct {
 		name   string
@@ -238,10 +241,10 @@ func TestPostfixExporter_CollectFromLogline(t *testing.T) {
 					"Mar 16 23:30:44 123-mail postfix/qmgr[29980]: warning: please avoid flushing the whole queue when you have",
 					"Mar 16 23:30:44 123-mail postfix/qmgr[29980]: warning: lots of deferred mail, that is bad for performance",
 				},
-				unsupportedLogEntries: []string{
-					`label:<name:"level" value:"fatal" > label:<name:"service" value:"smtpd" > counter:<value:1 > `,
-					`label:<name:"level" value:"warning" > label:<name:"service" value:"qmgr" > counter:<value:2 > `,
-					`label:<name:"level" value:"" > label:<name:"service" value:"smtpd" > counter:<value:1 > `,
+				unsupportedLogEntries: []unsupportedLogEntry{
+					{labels: map[string]string{"level": "fatal", "service": "smtpd"}, count: 1},
+					{labels: map[string]string{"level": "warning", "service": "qmgr"}, count: 2},
+					{labels: map[string]string{"level": "", "service": "smtpd"}, count: 1},
 				},
 			},
 			fields: fields{
@@ -333,25 +336,39 @@ func assertCounterEquals(t *testing.T, counter prometheus.Collector, expected in
 	}
 }
 
-func assertVecMetricsEquals(t *testing.T, counter *prometheus.CounterVec, expected []string, message string) {
-	if expected != nil {
-		metricsChan := make(chan prometheus.Metric)
-		go func() {
-			counter.Collect(metricsChan)
-			close(metricsChan)
-		}()
-		var res []string
-		for metric := range metricsChan {
-			metricDto := io_prometheus_client.Metric{}
-			metric.Write(&metricDto)
-			res = append(res, metricDto.String())
+func assertVecMetricsEquals(t *testing.T, counter *prometheus.CounterVec, expected []unsupportedLogEntry, message string) {
+	t.Helper()
+	if expected == nil {
+		return
+	}
+
+	metricsChan := make(chan prometheus.Metric)
+	go func() {
+		counter.Collect(metricsChan)
+		close(metricsChan)
+	}()
+
+	var actual []unsupportedLogEntry
+	for metric := range metricsChan {
+		metricDto := io_prometheus_client.Metric{}
+		if err := metric.Write(&metricDto); err != nil {
+			t.Errorf("could not read metric: %v", err)
+			continue
+		}
+		if metricDto.GetCounter() == nil {
+			t.Error("expected a counter metric")
+			continue
 		}
 
-		// Make comparison order-independent
-		expectedCopy := append([]string(nil), expected...)
-		sort.Strings(expectedCopy)
-		sort.Strings(res)
-
-		assert.Equal(t, expectedCopy, res, message)
+		labels := make(map[string]string)
+		for _, label := range metricDto.GetLabel() {
+			labels[label.GetName()] = label.GetValue()
+		}
+		actual = append(actual, unsupportedLogEntry{
+			labels: labels,
+			count:  metricDto.GetCounter().GetValue(),
+		})
 	}
+
+	assert.ElementsMatch(t, expected, actual, message)
 }
